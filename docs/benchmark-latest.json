@@ -1,0 +1,16 @@
+{
+  "workload": "8 x 1920x1080 30 FPS motion clips; 60-second 1080x1920 project; voice/music/5 SFX; 10 captions/2 titles",
+  "fixture": "D:\\NVK\\NVK\\Projects\\Edit_Video_Local\\.cache\\benchmark-1791650168316\\benchmark.shortcut",
+  "node": "v24.19.0",
+  "cpuExportSeconds": 32.22,
+  "projectLoadMs": 1940,
+  "firstFrameMs": 2120,
+  "seeksMs": [172, 155, 153, 63, 43],
+  "electronWorkingSetMiB": 808,
+  "playbackFrameGapsMs": {
+    "median": 8.3,
+    "p95": 8.4,
+    "max": 33.5,
+    "samples": 120
+  }
+}

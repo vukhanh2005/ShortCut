@@ -1,0 +1,8 @@
+*.ps1
+package-lock.json
+assets/
+release/
+dist/
+dist-electron/
+.cache/
+test-results/

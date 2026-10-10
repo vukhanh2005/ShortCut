@@ -1,0 +1,13 @@
+{
+  "packaged": true,
+  "executablePath": "D:\\NVK\\NVK\\Projects\\Edit_Video_Local\\release\\win-unpacked\\ShortCut Studio.exe",
+  "checked": [
+    "production window",
+    "FFmpeg discovery",
+    "real 1080p project open",
+    "byte-range seek",
+    "playback advancement",
+    "no UI errors"
+  ],
+  "developmentServer": false
+}

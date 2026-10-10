@@ -16,7 +16,7 @@
     "check": "npm run build && npm test",
     "format": "prettier --write src electron tests scripts *.json *.ts *.html docs README.md",
     "format:check": "prettier --check src electron tests scripts *.json *.ts *.html docs README.md",
-    "package": "npm run build && electron-builder --win portable --publish never",
+    "package": "npm run build && electron-builder --win portable nsis --publish never",
     "package:dir": "npm run build && electron-builder --win --dir --publish never"
   },
   "dependencies": {
@@ -41,9 +41,32 @@
   "build": {
     "appId": "studio.shortcut.editor",
     "productName": "ShortCut Studio",
-    "directories": { "output": "release" },
-    "files": ["dist/**", "dist-electron/**", "package.json"],
-    "win": { "target": "portable", "signAndEditExecutable": false },
-    "portable": { "artifactName": "ShortCut-Studio-${version}-Windows.exe" }
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "dist-electron/**",
+      "assets/**",
+      "package.json",
+      "LICENSE",
+      "docs/FFMPEG-SETUP.md",
+      "docs/THIRD-PARTY-NOTICES.md"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "assets/icon.ico",
+      "signExecutable": false
+    },
+    "portable": {
+      "artifactName": "ShortCut-Studio-${version}-Windows.exe"
+    },
+    "compression": "normal",
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "artifactName": "ShortCut-Studio-${version}-Setup.exe"
+    }
   }
 }
