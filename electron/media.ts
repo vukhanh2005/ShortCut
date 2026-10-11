@@ -10,6 +10,8 @@ import {
 import path from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { run } from "./process.js";
+import { analyzeWaveform } from "./waveform.js";
+import { validWaveform } from "../src/editor/waveform.js";
 import {
   MAX_DURATION,
   type MediaAsset,
@@ -20,6 +22,7 @@ export interface Probe {
   streams: {
     codec_type: string;
     codec_name?: string;
+    channels?: number;
     width?: number;
     height?: number;
     avg_frame_rate?: string;
@@ -39,6 +42,16 @@ export async function probe(file: string): Promise<Probe> {
     file,
   ]);
   return JSON.parse(result.toString()) as Probe;
+}
+export function validateReplacement(original: MediaAsset, loaded: MediaAsset) {
+  if (loaded.type !== original.type)
+    throw new Error("Replacement must have the same media type.");
+  if (original.hasAudio && !loaded.hasAudio)
+    throw new Error("Replacement must preserve the original audio stream.");
+  if (loaded.type !== "image" && loaded.duration < original.duration)
+    throw new Error(
+      "Replacement is shorter than original media. Choose a file at least as long to preserve source ranges.",
+    );
 }
 export async function importAsset(
   file: string,
@@ -101,7 +114,9 @@ export async function importAsset(
   };
   await mkdir(cache, { recursive: true });
   const key = createHash("sha256")
-    .update(`${file}:${info.size}:${info.mtimeMs}:v1`)
+    .update(
+      `${file}:${info.size}:${info.mtimeMs}:wave-v2-48000-allchannels-256-131072`,
+    )
     .digest("hex");
   if (video) {
     const thumbnail = path.join(cache, `${key}.jpg`);
@@ -127,49 +142,17 @@ export async function importAsset(
   if (audio) {
     const wavePath = path.join(cache, `${key}.json`);
     try {
-      asset.waveform = JSON.parse(await readFile(wavePath, "utf8"));
+      const cached: unknown = JSON.parse(await readFile(wavePath, "utf8"));
+      if (!validWaveform(cached))
+        throw new Error("Rebuild outdated waveform cache.");
+      asset.waveform = cached;
     } catch {
-      const peaks = Array<number>(256).fill(0);
-      let sample = 0;
-      let carry = Buffer.alloc(0);
-      await run(
-        "ffmpeg",
-        [
-          "-hide_banner",
-          "-v",
-          "error",
-          "-i",
-          file,
-          "-vn",
-          "-ac",
-          "1",
-          "-ar",
-          "8000",
-          "-f",
-          "s16le",
-          "-",
-        ],
-        {
-          timeout: 300000,
-          onStdout(chunk) {
-            const data = Buffer.concat([carry, chunk]);
-            const count = data.length - (data.length % 2);
-            for (let i = 0; i < count; i += 2) {
-              const bucket = Math.min(
-                255,
-                Math.floor((sample++ / (seconds(length) * 8000)) * 256),
-              );
-              peaks[bucket] = Math.max(
-                peaks[bucket],
-                Math.abs(data.readInt16LE(i)) / 32768,
-              );
-            }
-            carry = data.subarray(count);
-          },
-        },
+      asset.waveform = await analyzeWaveform(
+        file,
+        seconds(length),
+        metadata.streams.find((s) => s.codec_type === "audio")?.channels ?? 1,
       );
-      asset.waveform = peaks;
-      await writeFile(wavePath, JSON.stringify(peaks));
+      await writeFile(wavePath, JSON.stringify(asset.waveform));
     }
   }
   return asset;

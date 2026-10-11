@@ -178,7 +178,12 @@ test("imports real Unicode video, silent video, audio and image with thumbnails 
   expect((await stat(project.mediaAssets[0].thumbnail!)).size).toBeGreaterThan(
     0,
   );
-  expect(Math.max(...project.mediaAssets[2].waveform!)).toBeGreaterThan(0.05);
+  const waveform = project.mediaAssets[2].waveform!;
+  expect(
+    Math.max(
+      ...(Array.isArray(waveform) ? waveform : waveform.levels[0].peaks[0]),
+    ),
+  ).toBeGreaterThan(0.05);
 });
 test("atomic persistence preserves last known-good backup and ignores interrupted temp", async () => {
   const file = path.join(root, "project.shortcut");
@@ -268,6 +273,66 @@ test("real render respects trim, speed, layers, text and audio; probe and decode
     energy += (audio.readInt16LE(i) / 32768) ** 2;
   expect(Math.sqrt(energy / (audio.length / 2))).toBeGreaterThan(0.01);
 });
+test("track gain and clip mute change actual exported audio and survive serialization", async () => {
+  const p = newProject(160, 284);
+  p.mediaAssets = project.mediaAssets;
+  const picture = newClip(p.tracks[1].id, p.mediaAssets[0]);
+  picture.audioEnabled = false;
+  picture.timelineDuration = picture.sourceOut = S;
+  p.tracks[1].clips = [picture];
+  const voice = newClip(p.tracks[2].id, p.mediaAssets[2]);
+  voice.timelineDuration = voice.sourceOut = S;
+  voice.volume = 0.5;
+  p.tracks[2].volume = 0.5;
+  p.tracks[2].clips = [voice];
+  const saved = path.join(root, "mixer.shortcut");
+  await saveProject(saved, p);
+  const reopened = await readProject(saved);
+  expect(reopened.tracks[2].volume).toBe(0.5);
+  const file = path.join(root, "gain.mp4");
+  await render(reopened, file, {
+    quality: 23,
+    audioBitrate: 192,
+    hardware: false,
+  });
+  const pcm = await run("ffmpeg", [
+    "-v",
+    "error",
+    "-ss",
+    "0.3",
+    "-i",
+    file,
+    "-t",
+    "0.2",
+    "-vn",
+    "-ac",
+    "1",
+    "-ar",
+    "8000",
+    "-f",
+    "s16le",
+    "-",
+  ]);
+  let energy = 0;
+  for (let i = 0; i < pcm.length; i += 2)
+    energy += (pcm.readInt16LE(i) / 32768) ** 2;
+  expect(Math.sqrt(energy / (pcm.length / 2))).toBeCloseTo(
+    (0.125 * 0.25) / Math.sqrt(2),
+    2,
+  );
+  voice.muted = true;
+  const muted = path.join(root, "muted.mp4");
+  await render(p, muted, { quality: 23, audioBitrate: 128, hardware: false });
+  expect(
+    (await probe(muted)).streams.some((s) => s.codec_type === "audio"),
+  ).toBe(false);
+  voice.muted = false;
+  p.tracks[2].volume = 0;
+  expect(buildRenderPlan(p).audible).toBe(false);
+  p.tracks[2].volume = NaN;
+  expect(() => validateProject(p)).toThrow("track volume");
+});
+
 test("cancel terminates render and removes incomplete outputs", async () => {
   const controller = new AbortController();
   const target = path.join(root, "cancelled.mp4");

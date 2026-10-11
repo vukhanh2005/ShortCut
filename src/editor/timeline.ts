@@ -6,12 +6,36 @@ import {
   uid,
   validateProject,
   quantize,
+  newTrack,
+  cloneProject,
 } from "./model.js";
+export type InsertMode = "normal" | "smart" | "overwrite" | "ripple";
 export type Edit =
-  | { type: "insert"; clip: Clip }
+  | {
+      type: "insertMany";
+      clips: Clip[];
+      mode?: InsertMode;
+      newTrack?: Track;
+      newTracks?: Track[];
+    }
+  | { type: "insert"; clip: Clip; mode?: InsertMode; newTrack?: Track }
+  | { type: "deleteTrack"; trackId: string }
   | { type: "delete"; ids: string[] }
   | { type: "split"; ids: string[]; at: number }
-  | { type: "move"; ids: string[]; delta: number; trackId?: string }
+  | {
+      type: "move";
+      ids: string[];
+      delta: number;
+      trackId?: string;
+      anchorId?: string;
+      newTrack?: Track;
+      placement?: {
+        targetId: string;
+        side: "before" | "after";
+        ripple?: boolean;
+      };
+    }
+  | { type: "separateAudio"; id: string; linked: boolean }
   | { type: "trim"; id: string; edge: "start" | "end"; at: number }
   | { type: "speed"; id: string; speed: number }
   | {
@@ -24,6 +48,7 @@ export type Edit =
           | "transform"
           | "opacity"
           | "volume"
+          | "muted"
           | "fadeIn"
           | "fadeOut"
           | "text"
@@ -68,7 +93,7 @@ function ripple(
       if (exempt.has(clip.id) || end(clip) <= removedFrom) continue;
       if (clip.timelineStart < boundary)
         throw new Error(
-          `"${clip.name}" spans the ripple boundary. Split it, or use active-track scope.`,
+          `Cannot ripple edit: "${clip.name}" spans the edit boundary on "${track.name}". Use normal editing or active-track scope.`,
         );
       unlocked(track);
       clip.timelineStart += delta;
@@ -79,14 +104,125 @@ function clampFades(c: Clip) {
   c.fadeIn = Math.min(c.fadeIn, c.timelineDuration);
   c.fadeOut = Math.min(c.fadeOut, c.timelineDuration - c.fadeIn);
 }
+function shiftSequence(
+  p: Project,
+  track: Track,
+  boundary: number,
+  delta: number,
+  excluded: Set<string>,
+) {
+  const ids = linkedIds(
+    p,
+    track.clips
+      .filter((c) => !excluded.has(c.id) && c.timelineStart >= boundary)
+      .map((c) => c.id),
+  );
+  for (const id of ids) {
+    if (excluded.has(id))
+      throw new Error(
+        "Insertion would separate a linked group. Move the group to free space.",
+      );
+    const { clip, track: owner } = locate(p, id);
+    unlocked(owner);
+    clip.timelineStart += delta;
+  }
+}
+export function placementTarget(
+  p: Project,
+  trackId: string,
+  at: number,
+  span: number,
+  pointer: number,
+  excluded: string[] = [],
+) {
+  const clips =
+    p.tracks
+      .find((t) => t.id === trackId)
+      ?.clips.filter((c) => !excluded.includes(c.id)) ?? [];
+  const target =
+    clips.find((c) => pointer >= c.timelineStart && pointer < end(c)) ??
+    clips.find((c) => at < end(c) && at + span > c.timelineStart);
+  if (!target) return undefined;
+  const side =
+    pointer < target.timelineStart + target.timelineDuration / 2
+      ? ("before" as const)
+      : ("after" as const);
+  return {
+    targetId: target.id,
+    side,
+    at: side === "before" ? target.timelineStart : end(target),
+  };
+}
 export function editProject(project: Project, command: Edit): Project {
-  const p = structuredClone(project);
+  if (command.type === "insertMany") {
+    if (!command.clips.length) throw new Error("Select media to insert.");
+    let next = project;
+    for (let i = 0; i < command.clips.length; i++)
+      next = editProject(next, {
+        type: "insert",
+        clip: command.clips[i],
+        mode: command.mode,
+        newTrack: !next.tracks.some((t) => t.id === command.clips[i].trackId)
+          ? [command.newTrack, ...(command.newTracks ?? [])].find(
+              (t) => t?.id === command.clips[i].trackId,
+            )
+          : undefined,
+      });
+    return next;
+  }
+  const p = cloneProject(project);
   const isRipple = p.settings.ripple;
-  if (command.type === "insert") {
+  if (
+    (command.type === "insert" || command.type === "move") &&
+    command.newTrack
+  ) {
+    const track = structuredClone(command.newTrack);
+    if (
+      track.id !==
+      (command.type === "insert" ? command.clip.trackId : command.trackId)
+    )
+      throw new Error("New track must be the drop destination.");
+    if (
+      track.clips.length ||
+      track.type === "subtitle" ||
+      p.tracks.some((t) => t.id === track.id)
+    )
+      throw new Error("Choose an empty new video or audio track.");
+    const index =
+      track.type === "video"
+        ? p.tracks.findIndex((t) => t.type === "video")
+        : p.tracks.map((t) => t.type).lastIndexOf("audio") + 1;
+    p.tracks.splice(index < 0 ? 0 : index, 0, track);
+  }
+  if (command.type === "deleteTrack") {
+    const track = p.tracks.find((t) => t.id === command.trackId);
+    if (!track) throw new Error("Track no longer exists.");
+    unlocked(track);
+    if (p.tracks.length === 1)
+      throw new Error("Keep at least one timeline track.");
+    const groups = new Set(track.clips.map((c) => c.groupId).filter(Boolean));
+    p.tracks = p.tracks.filter((t) => t.id !== track.id);
+    for (const t of p.tracks)
+      for (const c of t.clips) {
+        if (c.groupId && groups.has(c.groupId)) {
+          unlocked(t);
+          delete c.groupId;
+        }
+      }
+  } else if (command.type === "insert") {
     const track = p.tracks.find((t) => t.id === command.clip.trackId);
     if (!track) throw new Error("Select a destination track.");
     unlocked(track);
-    if (isRipple)
+    const asset = p.mediaAssets.find((a) => a.id === command.clip.mediaAssetId);
+    if (
+      track.type === "audio" &&
+      asset?.type === "video" &&
+      !command.clip.audioOnly
+    )
+      throw new Error(
+        "Video belongs on a video track. Use Extract Audio to create an audio clip.",
+      );
+    if (command.mode === "ripple")
       ripple(
         p,
         track.id,
@@ -94,7 +230,92 @@ export function editProject(project: Project, command: Edit): Project {
         command.clip.timelineDuration,
         new Set(),
       );
+    if (command.mode === "smart") {
+      if (
+        track.clips.some(
+          (c) =>
+            c.timelineStart < command.clip.timelineStart &&
+            end(c) > command.clip.timelineStart,
+        )
+      )
+        throw new Error(
+          "Choose before or after the occupied clip for smart insertion.",
+        );
+      shiftSequence(
+        p,
+        track,
+        command.clip.timelineStart,
+        command.clip.timelineDuration,
+        new Set(),
+      );
+    }
+    if (command.mode === "overwrite") {
+      const start = command.clip.timelineStart,
+        stop = end(command.clip);
+      track.clips = track.clips.flatMap((c) => {
+        if (end(c) <= start || c.timelineStart >= stop) return [c];
+        if (c.groupId)
+          throw new Error(
+            "Unlink overlapping clips before overwrite insertion.",
+          );
+        const pieces: Clip[] = [];
+        if (c.timelineStart < start) {
+          const left = structuredClone(c);
+          left.timelineDuration = start - c.timelineStart;
+          left.sourceOut =
+            left.sourceIn +
+            Math.round(left.timelineDuration * left.playbackSpeed);
+          left.fadeOut = 0;
+          clampFades(left);
+          pieces.push(left);
+        }
+        if (end(c) > stop) {
+          const right = structuredClone(c);
+          if (pieces.length) right.id = uid();
+          right.sourceIn += Math.round(
+            (stop - c.timelineStart) * c.playbackSpeed,
+          );
+          right.timelineStart = stop;
+          right.timelineDuration = end(c) - stop;
+          right.fadeIn = 0;
+          clampFades(right);
+          pieces.push(right);
+        }
+        return pieces;
+      });
+    }
     track.clips.push(structuredClone(command.clip));
+  } else if (command.type === "separateAudio") {
+    const { clip, track } = locate(p, command.id);
+    unlocked(track);
+    const asset = p.mediaAssets.find((a) => a.id === clip.mediaAssetId);
+    if (
+      track.type !== "video" ||
+      !asset?.hasAudio ||
+      clip.audioEnabled === false
+    )
+      throw new Error(
+        "Select a video with attached audio. Already separated audio can be unlinked.",
+      );
+    for (const id of linkedIds(p, [clip.id])) unlocked(locate(p, id).track);
+    const audioTrack =
+      p.tracks.find(
+        (t) =>
+          t.type === "audio" &&
+          !t.locked &&
+          t.clips.every(
+            (c) => end(c) <= clip.timelineStart || c.timelineStart >= end(clip),
+          ),
+      ) ?? newTrack("audio", "Extracted audio");
+    if (!p.tracks.includes(audioTrack)) p.tracks.push(audioTrack);
+    const audio = structuredClone(clip);
+    audio.id = uid();
+    audio.trackId = audioTrack.id;
+    audio.name = `${clip.name} (audio)`;
+    audio.audioOnly = true;
+    audio.groupId = command.linked ? (clip.groupId ??= uid()) : undefined;
+    clip.audioEnabled = false;
+    audioTrack.clips.push(audio);
   } else if (command.type === "trim" || command.type === "speed") {
     const selected = linkedIds(p, [command.id]);
     const primary = locate(p, command.id).clip;
@@ -205,20 +426,99 @@ export function editProject(project: Project, command: Edit): Project {
       if (!splits)
         throw new Error("Place playhead inside selected clip to split.");
     } else if (command.type === "move") {
-      if (command.trackId && ids.size > 1)
-        throw new Error(
-          "Move linked or selected clips within their tracks; unlink to change tracks.",
+      const anchor = locate(p, command.anchorId ?? command.ids[0]);
+      if (!ids.has(anchor.clip.id))
+        throw new Error("Drag anchor must be selected.");
+      const sourceTrackId = anchor.track.id;
+      const destination = command.trackId
+        ? p.tracks.find((t) => t.id === command.trackId)
+        : undefined;
+      if (command.trackId && !destination)
+        throw new Error("Destination track missing.");
+      if (destination) {
+        unlocked(destination);
+        if (destination.type !== anchor.track.type)
+          throw new Error(
+            "Invalid drop: move clips to a matching track type. Use Extract Audio to separate sound.",
+          );
+      }
+      let delta = command.delta;
+      if (command.placement) {
+        if (!destination)
+          throw new Error("Choose a destination for sequence insertion.");
+        const { clip: target, track: targetTrack } = locate(
+          p,
+          command.placement.targetId,
         );
+        if (targetTrack.id !== destination.id || ids.has(target.id))
+          throw new Error("Choose an unselected destination clip.");
+        const block = anchor.track.clips.filter((c) => ids.has(c.id));
+        const first = Math.min(...block.map((c) => c.timelineStart)),
+          last = Math.max(...block.map(end)),
+          span = last - first;
+        if (
+          destination.id === sourceTrackId &&
+          !anchor.track.clips.some(
+            (c) => !ids.has(c.id) && c.timelineStart < last && end(c) > first,
+          )
+        )
+          shiftSequence(p, destination, last, -span, ids);
+        const boundary =
+          command.placement.side === "before"
+            ? target.timelineStart
+            : end(target);
+        if (command.placement.ripple)
+          ripple(p, destination.id, boundary, span, ids);
+        else shiftSequence(p, destination, boundary, span, ids);
+        delta = boundary - first;
+      }
       for (const id of ids) {
         const { clip, track } = locate(p, id);
-        clip.timelineStart += command.delta;
-        if (command.trackId && command.trackId !== track.id) {
-          const destination = p.tracks.find((t) => t.id === command.trackId);
-          if (!destination) throw new Error("Destination track missing.");
-          unlocked(destination);
+        clip.timelineStart += delta;
+        if (
+          destination &&
+          track.id === sourceTrackId &&
+          destination.id !== track.id
+        ) {
           track.clips = track.clips.filter((c) => c.id !== id);
           clip.trackId = destination.id;
           destination.clips.push(clip);
+        }
+      }
+      if (destination?.type === "video" && destination.id !== sourceTrackId) {
+        for (const track of [...p.tracks].filter((t) => t.type === "audio")) {
+          const moving = track.clips.filter((c) => ids.has(c.id));
+          const others = track.clips.filter((c) => !ids.has(c.id));
+          const overlaps = (a: Clip, b: Clip) =>
+            a.timelineStart < end(b) && b.timelineStart < end(a);
+          if (!moving.some((c) => others.some((other) => overlaps(c, other))))
+            continue;
+          const target = p.tracks.find(
+            (t) =>
+              t.type === "audio" &&
+              !t.locked &&
+              t.id !== track.id &&
+              t.muted === track.muted &&
+              (t.volume ?? 1) === (track.volume ?? 1) &&
+              moving.every((c) =>
+                t.clips.every((other) => !overlaps(c, other)),
+              ),
+          ) ?? {
+            ...newTrack("audio", "Linked audio"),
+            muted: track.muted,
+            volume: track.volume,
+          };
+          if (!p.tracks.includes(target))
+            p.tracks.splice(
+              p.tracks.map((t) => t.type).lastIndexOf("audio") + 1,
+              0,
+              target,
+            );
+          track.clips = others;
+          for (const c of moving) {
+            c.trackId = target.id;
+            target.clips.push(c);
+          }
         }
       }
     } else if (command.type === "patch") {
@@ -236,6 +536,89 @@ export function editProject(project: Project, command: Edit): Project {
   validateProject(p);
   return p;
 }
+export interface SnapTarget {
+  id: string;
+  time: number;
+  priority: number;
+  label: string;
+}
+export interface SnapResult {
+  time: number;
+  target?: SnapTarget;
+}
+export function snapTargets(
+  p: Project,
+  playhead?: number,
+  excluded: string[] = [],
+  guides: SnapTarget[] = [],
+): SnapTarget[] {
+  return [
+    { id: "zero", time: 0, priority: 0, label: "Timeline start" },
+    ...guides,
+    ...(p.markers ?? []).map((marker) => ({
+      id: `marker:${marker.id}`,
+      time: marker.time,
+      priority: 0,
+      label: marker.name,
+    })),
+    ...(playhead === undefined
+      ? []
+      : [{ id: "playhead", time: playhead, priority: 1, label: "Playhead" }]),
+    ...p.tracks.flatMap((t) =>
+      t.clips
+        .filter((c) => !excluded.includes(c.id))
+        .flatMap((c) => [
+          {
+            id: `${c.id}:start`,
+            time: c.timelineStart,
+            priority: 2,
+            label: `${c.name} start`,
+          },
+          {
+            id: `${c.id}:end`,
+            time: end(c),
+            priority: 2,
+            label: `${c.name} end`,
+          },
+        ]),
+    ),
+  ];
+}
+export function resolveSnap(
+  p: Project,
+  time: number,
+  zoom: number,
+  targets: SnapTarget[],
+  previous?: SnapTarget,
+  offsets = [0],
+): SnapResult {
+  const value = Math.max(0, quantize(p, time));
+  if (!p.settings.snapping) return { time: value };
+  const candidates = targets.flatMap((target) =>
+    offsets.map((offset) => ({
+      target,
+      time: target.time - offset,
+      distance: (Math.abs(target.time - offset - time) * zoom) / 1_000_000,
+    })),
+  );
+  const held = candidates
+    .filter(
+      (c) => c.target.id === previous?.id && c.time >= 0 && c.distance <= 13,
+    )
+    .sort((a, b) => a.distance - b.distance)[0];
+  const best =
+    held ??
+    candidates
+      .filter((c) => c.time >= 0 && c.distance <= 10)
+      .sort(
+        (a, b) =>
+          a.distance - b.distance ||
+          a.target.priority - b.target.priority ||
+          a.target.time - b.target.time ||
+          a.target.id.localeCompare(b.target.id),
+      )[0];
+  return best ? { time: best.time, target: best.target } : { time: value };
+}
 export function snap(
   p: Project,
   time: number,
@@ -243,22 +626,12 @@ export function snap(
   excluded: string[],
   threshold: number,
 ): number {
-  const value = Math.max(0, quantize(p, time));
-  if (!p.settings.snapping) return value;
-  const candidates = [
-    0,
-    playhead,
-    ...p.tracks.flatMap((t) =>
-      t.clips
-        .filter((c) => !excluded.includes(c.id))
-        .flatMap((c) => [c.timelineStart, end(c)]),
-    ),
-  ];
-  const closest = candidates.reduce(
-    (a, b) => (Math.abs(b - value) < Math.abs(a - value) ? b : a),
-    candidates[0],
-  );
-  return Math.abs(closest - value) <= threshold ? closest : value;
+  return resolveSnap(
+    p,
+    time,
+    10_000_000 / threshold,
+    snapTargets(p, playhead, excluded),
+  ).time;
 }
 export function fadeAt(c: Clip, localTime: number): number {
   return Math.max(

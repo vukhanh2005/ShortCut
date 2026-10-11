@@ -7,6 +7,8 @@
     "real 1080p project open",
     "byte-range seek",
     "playback advancement",
+    "captured playhead scrub outside ruler",
+    "live rotation before blur and Escape restore",
     "no UI errors"
   ],
   "developmentServer": false

@@ -1,3 +1,4 @@
+import { type Waveform, validWaveform } from "./waveform.js";
 export const SECOND = 1_000_000;
 export const MAX_DURATION = 6 * 3600 * SECOND;
 export type MediaKind = "video" | "audio" | "image";
@@ -15,7 +16,7 @@ export interface MediaAsset {
   size: number;
   thumbnail?: string;
   url?: string;
-  waveform?: number[];
+  waveform?: number[] | Waveform;
   missing?: boolean;
   folder: string;
   favorite: boolean;
@@ -41,6 +42,9 @@ export interface Clip {
   sourceOut: number;
   playbackSpeed: number;
   groupId?: string;
+  audioEnabled?: boolean;
+  audioOnly?: boolean;
+  muted?: boolean;
   transform: {
     x: number;
     y: number;
@@ -48,6 +52,7 @@ export interface Clip {
     rotation: number;
     flipX: boolean;
     flipY: boolean;
+    crop?: { left: number; right: number; top: number; bottom: number };
   };
   opacity: number;
   volume: number;
@@ -62,6 +67,7 @@ export interface Track {
   visible: boolean;
   locked: boolean;
   muted: boolean;
+  volume?: number;
   clips: Clip[];
 }
 export interface Project {
@@ -73,6 +79,7 @@ export interface Project {
   aspectRatio: string;
   tracks: Track[];
   mediaAssets: MediaAsset[];
+  markers?: { id: string; time: number; name: string }[];
   settings: {
     ripple: boolean;
     rippleScope: "all" | "track";
@@ -80,6 +87,11 @@ export interface Project {
   };
 }
 export const uid = () => globalThis.crypto.randomUUID();
+export function cloneProject(project: Project): Project {
+  const copy = structuredClone({ ...project, mediaAssets: [] });
+  // Decoded waveforms are immutable asset caches shared by history snapshots.
+  return { ...copy, mediaAssets: project.mediaAssets.map((a) => ({ ...a })) };
+}
 export const seconds = (time: number) => time / SECOND;
 export const ticks = (time: number) => Math.round(time * SECOND);
 export const end = (clip: Clip) => clip.timelineStart + clip.timelineDuration;
@@ -89,6 +101,18 @@ export const frame = (project: Project, index: number) =>
   Math.round((index * SECOND) / project.frameRate);
 export const quantize = (project: Project, time: number) =>
   frame(project, Math.round((time * project.frameRate) / SECOND));
+export function seekFrame(project: Project, time: number): number {
+  const length = duration(project);
+  let last = Math.max(0, Math.ceil((length * project.frameRate) / SECOND) - 1);
+  if (last && frame(project, last) >= length) last--;
+  return frame(
+    project,
+    Math.max(
+      0,
+      Math.min(last, Math.round((time * project.frameRate) / SECOND)),
+    ),
+  );
+}
 export function newTrack(type: TrackKind, name: string): Track {
   return {
     id: uid(),
@@ -114,7 +138,7 @@ export function newProject(width = 1080, height = 1920, fps = 30): Project {
       newTrack("audio", "Voice & music"),
     ],
     mediaAssets: [],
-    settings: { ripple: true, rippleScope: "all", snapping: true },
+    settings: { ripple: false, rippleScope: "all", snapping: true },
   };
 }
 export function newClip(trackId: string, asset?: MediaAsset, start = 0): Clip {
@@ -237,6 +261,17 @@ export function validateProject(input: unknown): asserts input is Project {
     requireThat(!ids.has(id), "Duplicate entity ID.");
     ids.add(id);
   };
+  if (p.markers !== undefined) {
+    requireThat(
+      Array.isArray(p.markers) && p.markers.length <= 512,
+      "Project supports at most 512 markers.",
+    );
+    for (const marker of p.markers) {
+      identity(marker.id);
+      label(marker.name, "marker name");
+      bounded(marker.time, 0, MAX_DURATION, "marker time", true);
+    }
+  }
   for (const a of p.mediaAssets) {
     identity(a.id);
     label(a.path, "media path", 32767);
@@ -263,7 +298,8 @@ export function validateProject(input: unknown): asserts input is Project {
           a.waveform.every(
             (n) =>
               typeof n === "number" && Number.isFinite(n) && n >= 0 && n <= 1,
-          )),
+          )) ||
+        validWaveform(a.waveform),
       "Invalid waveform.",
     );
   }
@@ -271,6 +307,7 @@ export function validateProject(input: unknown): asserts input is Project {
   for (const t of p.tracks) {
     identity(t.id);
     label(t.name, "track name");
+    if (t.volume !== undefined) bounded(t.volume, 0, 2, "track volume");
     requireThat(
       ["video", "audio", "subtitle"].includes(t.type),
       "Unknown track type.",
@@ -289,10 +326,8 @@ export function validateProject(input: unknown): asserts input is Project {
       identity(c.id);
       label(c.name, "clip name");
       requireThat(
-        !("effects" in c) &&
-          !("keyframes" in c) &&
-          !("crop" in (c.transform ?? {})),
-        "Unsupported effect, keyframe or crop data. This release supports static transforms and fades.",
+        !("effects" in c) && !("keyframes" in c),
+        "Unsupported effect or keyframe data. This release supports static transforms and fades.",
       );
       requireThat(c.trackId === t.id, "Clip belongs to another track.");
       bounded(c.timelineStart, 0, MAX_DURATION, "clip start", true);
@@ -339,6 +374,22 @@ export function validateProject(input: unknown): asserts input is Project {
         );
       bounded(c.opacity, 0, 1, "opacity");
       bounded(c.volume, 0, 2, "volume");
+      requireThat(
+        c.muted === undefined || typeof c.muted === "boolean",
+        "Invalid clip mute.",
+      );
+      requireThat(
+        c.audioEnabled === undefined || typeof c.audioEnabled === "boolean",
+        "Invalid audio enabled flag.",
+      );
+      requireThat(
+        c.audioOnly === undefined || typeof c.audioOnly === "boolean",
+        "Invalid audio-only flag.",
+      );
+      requireThat(
+        !c.audioOnly || t.type === "audio",
+        "Extracted audio belongs on an audio track.",
+      );
       bounded(c.fadeIn, 0, c.timelineDuration, "fade in", true);
       bounded(c.fadeOut, 0, c.timelineDuration, "fade out", true);
       requireThat(
@@ -349,6 +400,15 @@ export function validateProject(input: unknown): asserts input is Project {
       bounded(c.transform?.y, -7680, 7680, "position Y");
       bounded(c.transform?.scale, 0.1, 4, "scale");
       bounded(c.transform?.rotation, -180, 180, "rotation");
+      if (c.transform.crop !== undefined) {
+        const crop = c.transform.crop;
+        for (const edge of ["left", "right", "top", "bottom"] as const)
+          bounded(crop?.[edge], 0, 1, `crop ${edge}`);
+        requireThat(
+          !c.text && crop.left + crop.right < 1 && crop.top + crop.bottom < 1,
+          "Crop must leave visible media.",
+        );
+      }
       requireThat(
         typeof c.transform.flipX === "boolean" &&
           typeof c.transform.flipY === "boolean",

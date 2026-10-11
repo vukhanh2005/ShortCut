@@ -352,10 +352,31 @@ kbd {
   font-size: 11px;
 }
 .media-grid {
+  position: relative;
+  padding-bottom: 80px;
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 10px 8px;
   align-items: start;
+}
+.selection-marquee {
+  position: absolute;
+  z-index: 15;
+  pointer-events: none;
+  border: 1px solid #bee8c9;
+  background: #98dbac28;
+}
+.media-card.selected-asset {
+  outline: 2px solid #bce6c7;
+  outline-offset: -2px;
+}
+.media-selection-count {
+  color: #9eb9a8;
+  font-size: 10px;
+  padding: 4px 0 10px;
+}
+.track-lane:has(.drag-ghost) {
+  background-color: #a0dbb112;
 }
 .media-card {
   border: 1px solid #313b3e;
@@ -633,9 +654,94 @@ details input {
   flex-direction: column;
 }
 .inspector-content {
+  --control-bg: #182022;
+  --control-border: #3b4b44;
+  --section-gap: 12px;
   overflow: auto;
   padding: 15px;
   flex: 1;
+}
+.inspector-section {
+  border-bottom: 1px solid var(--control-border);
+  padding: 0 0 var(--section-gap);
+  margin-bottom: var(--section-gap);
+}
+.inspector-section > summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 7px 0;
+  color: #d0ded7;
+}
+.inspector-section > summary button {
+  float: right;
+  font-size: 9px;
+  padding: 2px 6px;
+  color: #9eb9a8;
+}
+.inspector-section-body {
+  display: grid;
+  gap: 9px;
+  padding-top: 7px;
+}
+.inspector-section-body .field-grid {
+  margin: 0;
+  gap: 8px;
+}
+.inspector-section-body .field {
+  min-width: 0;
+  margin: 0;
+}
+.property-range {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  font-size: 10px;
+  color: #a9b8b7;
+}
+.field > span {
+  display: flex;
+  justify-content: space-between;
+  gap: 4px;
+}
+.field input[aria-invalid="true"] {
+  border-color: #e1a66d;
+}
+.inspector-section-body input,
+.inspector-section-body select {
+  background: var(--control-bg);
+}
+.inspector-section-body input[type="range"] {
+  width: 100%;
+  accent-color: #a7d9b6;
+  cursor: pointer;
+}
+.inspector :focus-visible {
+  outline: 2px solid #bce6c7;
+  outline-offset: 2px;
+}
+.alignment-guide {
+  position: absolute;
+  pointer-events: none;
+  z-index: 30;
+  background: #f5cf72;
+}
+.alignment-guide.vertical {
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+}
+.alignment-guide.horizontal {
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 2px;
+}
+.text-layer {
+  touch-action: none;
+  user-select: none;
 }
 .inspector h4 {
   font-size: 11px;
@@ -823,10 +929,71 @@ details input {
   color: #7a8c86;
   padding: 8px 0 0 5px;
 }
+.timeline-marker {
+  position: absolute;
+  top: 0;
+  padding: 1px;
+  color: #f1cf78;
+  background: #493d22;
+  border: 0;
+}
 .track-row {
   height: 76px;
   display: flex;
   border-bottom: 1px solid #2a3434;
+}
+.track-type {
+  display: block;
+  font-size: 8px;
+  color: #8ca49d;
+  letter-spacing: 1px;
+}
+.track-head {
+  padding-top: 6px;
+}
+.track-create-zone {
+  position: relative;
+  height: 28px;
+  border-block: 1px dashed #486052;
+  color: #81988d;
+  background: #182720;
+  font-size: 10px;
+}
+.track-create-zone > span {
+  display: inline-block;
+  position: sticky;
+  left: 0;
+  width: 176px;
+  padding: 6px 13px;
+  background: #182720;
+  z-index: 4;
+}
+.track-create-zone.creating {
+  background: #335440;
+  border-color: #c5edab;
+}
+.track-create-zone .drag-ghost {
+  top: 2px;
+  height: 22px;
+  padding: 3px 8px;
+}
+.snap-guide {
+  position: absolute;
+  top: 32px;
+  bottom: 0;
+  border-left: 1px solid #f1cf78;
+  z-index: 6;
+  pointer-events: none;
+}
+.snap-guide > span {
+  position: sticky;
+  top: 34px;
+  display: inline-block;
+  padding: 3px 6px;
+  background: #493d22;
+  color: #ffe5a0;
+  font-size: 10px;
+  white-space: nowrap;
 }
 .track-name {
   width: 100%;
@@ -941,13 +1108,20 @@ details input {
   bottom: 5px;
   height: 26px;
   width: 100%;
-  opacity: 0.58;
+  opacity: 0.9;
   pointer-events: none;
 }
 .waveform path {
   stroke: #a9e5dc;
   stroke-width: 1;
   fill: none;
+}
+.waveform .waveform-center {
+  stroke: #a9e5dc;
+  opacity: 0.2;
+}
+.waveform .waveform-rms {
+  stroke: #efffdc;
 }
 .trim-handle {
   position: absolute;
@@ -974,13 +1148,48 @@ details input {
   z-index: 6;
   pointer-events: none;
 }
-.playhead > span {
+.playhead-handle {
   display: block;
-  width: 10px;
-  height: 10px;
-  margin-left: -4px;
+  width: 20px;
+  height: 24px;
+  margin-left: -10px;
+  padding: 0;
+  border: 0;
+  pointer-events: auto;
+  touch-action: none;
+  cursor: ew-resize;
   background: #efb779;
   clip-path: polygon(0 0, 100% 0, 100% 55%, 50% 100%, 0 55%);
+}
+.ruler,
+.clip,
+.trim-handle {
+  touch-action: none;
+}
+.drag-ghost {
+  position: absolute;
+  top: 6px;
+  height: 62px;
+  z-index: 8;
+  pointer-events: none;
+  border: 2px dashed #efb779;
+  background: #443528cc;
+  color: #fff;
+  padding: 6px;
+  overflow: hidden;
+}
+.drag-feedback {
+  position: fixed;
+  z-index: 100;
+  pointer-events: none;
+  max-width: 320px;
+  background: #24382d;
+  color: #fff;
+  padding: 8px;
+  font-size: 12px;
+}
+.drag-feedback.invalid {
+  background: #6a2922;
 }
 .missing {
   border-color: #d28270;

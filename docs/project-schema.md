@@ -13,7 +13,13 @@ duration. This conservative check preserves every existing source range.
 Preview proxies are cache/session resources and never replace export originals.
 
 Unknown schema versions are rejected; no earlier released schema requires a
-migration yet. Unsupported transition, keyframe and crop fields reject explicitly.
+migration yet. Unsupported transition and keyframe fields reject explicitly.
+Optional `audioEnabled` defaults to true; false disables embedded audio after
+separation. Optional `audioOnly` marks explicitly extracted clips, which must
+remain on audio tracks. Legacy video-source audio clips remain readable and gain
+this marker when copied. Optional `transform.crop` has normalized `left`, `right`,
+`top`, `bottom` values in [0,1]; opposing sums must be below 1. Missing crop means
+zero. Crop applies only to media. Existing schema-1 files need no migration.
 Add a tested migration before incrementing schemaVersion. Do not silently
 discard new render features when opening a newer project.
 
@@ -26,3 +32,15 @@ edits exist. Missing or damaged media is shown for relinking, not silently remov
 
 Recent paths (up to 12), recovery and cache use Electron's per-user application
 data directory. No account, remote storage, database or telemetry.
+
+Optional `Track.volume` defaults to 1 and validates finite 0..2. Optional
+`Clip.muted` defaults to false and affects sound only. Clip volume and track volume
+multiply in preview/export. Mute and gain persist independently of track mute and
+`audioEnabled` (which remains the extraction ownership flag). Inspector dB values
+convert to linear gain; -60 dB is a deliberate silence endpoint, not -infinity.
+
+Optional `markers: {id, time, name}[]` stores absolute project-time guides
+(maximum 512). Marker IDs share entity uniqueness validation. Markers never
+ripple and do not extend render duration. Runtime `MediaAsset.waveform` accepts
+legacy peak arrays or version-2 channel peak/RMS pyramids; serialization excludes
+both formats and hydration regenerates them from source/cache.

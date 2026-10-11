@@ -81,7 +81,13 @@ export function buildRenderPlan(p: Project): RenderPlan {
       }
       const asset = p.mediaAssets.find((a) => a.id === c.mediaAssetId)!;
       const visible = track.type === "video" && track.visible && c.opacity > 0;
-      const audible = asset.hasAudio && !track.muted && c.volume > 0;
+      const audible =
+        asset.hasAudio &&
+        c.audioEnabled !== false &&
+        !c.muted &&
+        (track.volume ?? 1) > 0 &&
+        !track.muted &&
+        c.volume > 0;
       if (!visible && !audible) continue;
       if (asset.missing) throw new Error(`Relink missing media: ${asset.name}`);
       if (asset.type === "image")
@@ -117,6 +123,17 @@ export function buildRenderPlan(p: Project): RenderPlan {
           "setsar=1",
           "format=rgba",
         ];
+        if (c.transform.crop) {
+          const crop = c.transform.crop;
+          const x = Math.min(w - 1, Math.round(w * crop.left));
+          const y = Math.min(h - 1, Math.round(h * crop.top));
+          const cw = Math.max(1, w - x - Math.round(w * crop.right));
+          const ch = Math.max(1, h - y - Math.round(h * crop.bottom));
+          chain.push(
+            `crop=${cw}:${ch}:${x}:${y}:exact=1`,
+            `pad=${w}:${h}:${x}:${y}:color=black@0`,
+          );
+        }
         if (c.transform.flipX) chain.push("hflip");
         if (c.transform.flipY) chain.push("vflip");
         if (c.transform.rotation) {
@@ -142,7 +159,7 @@ export function buildRenderPlan(p: Project): RenderPlan {
           "asetpts=PTS-STARTPTS",
           tempo(c.playbackSpeed),
           `atrim=duration=${time(c.timelineDuration)}`,
-          `volume=${number(c.volume)}`,
+          `volume=${number(c.volume * (track.volume ?? 1))}`,
         ];
         if (c.fadeIn) chain.push(`afade=t=in:st=0:d=${time(c.fadeIn)}`);
         if (c.fadeOut)

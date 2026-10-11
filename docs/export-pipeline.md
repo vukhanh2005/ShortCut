@@ -7,7 +7,7 @@ filter graph, ASS captions and output expectations. Renderer components never
 construct process commands. Child processes use spawn with shell disabled.
 
 Each clip input uses source in/out. PTS and atempo implement speed. Video is fit
-to project resolution, scaled, flipped, rotated, faded and composited at its
+to project resolution, scaled, cropped, flipped, rotated, faded and composited at its
 timeline offset over a black base. Hidden video can still contribute audio;
 mute controls sound separately. Audio uses gain, fades, sample-accurate delays,
 mixing and a final peak limiter. Blank intervals remain black/silent. Captions
@@ -49,3 +49,19 @@ do not export. Audio export limiter can differ from simultaneous preview peaks.
 No frame-exact decoded frame cache exists yet; browser buffering is used.
 Proxies normalize unsupported browser codecs and reduce resolution to 720px.
 Final export always reads originals.
+
+Static crop uses RGBA crop plus transparent padding back to the fitted dimensions,
+so preview CSS inset and export preserve the same center and expose lower layers.
+Export rounds crop edges to output pixels (at least one pixel remains). Browser
+subpixel edges and FFmpeg pixel rounding can differ at boundaries. Both paths
+honor `audioEnabled`; separated sound contributes only once. Native layer tests
+split a red/440 Hz then blue/880 Hz source, overlap its segments, verify rendered
+pixels, reverse track order, exercise crop/scale/rotation/position/opacity, and
+measure both frequencies before/during/after the overlap.
+
+Mixer: effective audio gain is clip.volume * (track.volume ?? 1) * fade envelope.
+Track mute, clip mute or audioEnabled=false suppress sound independently of picture
+visibility. Browser uses GainNode; FFmpeg uses volume and existing fades/limiter.
+When any active browser decoder seeks or buffers, all active media pause with the
+project clock and restart together after readiness. This reduces drift around
+stalls; independent browser clocks still require long-run qualification.

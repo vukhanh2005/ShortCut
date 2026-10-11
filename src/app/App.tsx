@@ -13,7 +13,13 @@ import {
   LoaderCircle,
 } from "lucide-react";
 import { useEditor } from "../stores/editor";
-import { duration, frame, newProject, serializeProject } from "../editor/model";
+import {
+  duration,
+  frame,
+  newProject,
+  serializeProject,
+  seekFrame,
+} from "../editor/model";
 import { MediaLibrary, busyTask } from "../components/MediaLibrary";
 import { Preview } from "../components/Preview";
 import { Timeline } from "../components/Timeline";
@@ -324,13 +330,15 @@ export function App() {
     return () => window.removeEventListener("beforeunload", before);
   }, []);
   const discard = () =>
-    !useEditor.getState().dirty ||
-    window.confirm("Discard unsaved changes? Save first to keep them.");
+    !useEditor.getState().busy &&
+    (!useEditor.getState().dirty ||
+      window.confirm("Discard unsaved changes? Save first to keep them."));
   const open = (recent?: string) => {
     if (!discard()) return;
     void busyTask("Opening project", async () => {
+      const expected = useEditor.getState().project;
       const result = await window.studio.openProject(recent);
-      if (result) s.load(result.project, result.path);
+      if (result) s.load(result.project, result.path, expected);
     });
   };
   useEffect(() => {
@@ -370,12 +378,16 @@ export function App() {
             ids: state.selection,
             at: state.playhead,
           });
+      } else if (!control && !e.altKey && k === "n") {
+        e.preventDefault();
+        state.toggleSnapping();
       } else if (e.code === "Space") {
         e.preventDefault();
         if (duration(state.project))
           useEditor.setState({
             playing: !state.playing,
-            ...(state.playhead >= duration(state.project)
+            ...(state.playhead >=
+            seekFrame(state.project, duration(state.project))
               ? { playhead: 0 }
               : {}),
           });
@@ -654,6 +666,7 @@ export function App() {
               ["Left / Right", "Step one project frame"],
               ["+ / -", "Timeline zoom"],
               ["Home", "Jump to start"],
+              ["N", "Toggle magnetic snapping"],
             ].map(([key, label]) => (
               <div key={key}>
                 <kbd>{key}</kbd>
@@ -681,7 +694,7 @@ export function App() {
                   const result = await window.studio.recover();
                   if (result) {
                     s.load(result.project);
-                    useEditor.setState({ dirty: true });
+                    useEditor.setState({ dirty: true, saved: "" });
                   }
                   setModal(null);
                 })

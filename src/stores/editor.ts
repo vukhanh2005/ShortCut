@@ -12,6 +12,8 @@ import {
   serializeProject,
   end,
   duration,
+  seekFrame,
+  cloneProject,
 } from "../editor/model.js";
 import { editProject, linkedIds, type Edit } from "../editor/timeline.js";
 interface Snapshot {
@@ -21,6 +23,11 @@ interface Snapshot {
   activeTrack: string;
 }
 interface EditorState extends Snapshot {
+  interactive: { key: string; base: Snapshot; project: Project } | null;
+  beginInteractive: (key: string) => void;
+  updateInteractive: (recipe: (p: Project) => Project | void) => boolean;
+  commitInteractive: () => boolean;
+  cancelInteractive: () => void;
   path: string | null;
   saved: string;
   dirty: boolean;
@@ -31,6 +38,10 @@ interface EditorState extends Snapshot {
   clipboard: Clip[];
   error: string | null;
   busy: string | null;
+  draggingAssetId: string | null;
+  draggingAssetIds: string[];
+  assetSelection: string[];
+  toggleSnapping: () => void;
   transact: (
     recipe: (p: Project) => Project | void,
     selection?: string[],
@@ -44,20 +55,69 @@ interface EditorState extends Snapshot {
   addText: () => void;
   addTrack: (type: TrackKind) => void;
   copy: () => void;
-  paste: () => void;
+  paste: (at?: number) => void;
   duplicate: () => void;
-  load: (project: Project, path?: string | null) => void;
+  load: (project: Project, path?: string | null, expected?: Project) => void;
   save: (saveAs?: boolean) => Promise<boolean>;
   importAssets: (result: { assets: MediaAsset[]; errors: string[] }) => void;
 }
 const initial = newProject();
+const snappingPreference = () => {
+  try {
+    const value = globalThis.localStorage?.getItem("shortcut.snapping");
+    return value === null || value === undefined ? undefined : value === "true";
+  } catch {
+    return undefined;
+  }
+};
+initial.settings.snapping = snappingPreference() ?? initial.settings.snapping;
+let documentGeneration = 0;
 const snapshot = (s: EditorState): Snapshot => ({
   project: s.project,
   selection: s.selection,
   playhead: s.playhead,
   activeTrack: s.activeTrack,
 });
+export const effectiveProject = (s: EditorState) =>
+  s.interactive?.project ?? s.project;
 export const useEditor = create<EditorState>((set, get) => ({
+  interactive: null,
+  beginInteractive(key) {
+    if (get().interactive?.key === key) return;
+    get().commitInteractive();
+    const state = get();
+    set({
+      interactive: { key, base: snapshot(state), project: state.project },
+      playing: false,
+      error: null,
+    });
+  },
+  updateInteractive(recipe) {
+    const edit = get().interactive;
+    if (!edit || edit.base.project !== get().project) return false;
+    try {
+      const draft = cloneProject(edit.project),
+        next = recipe(draft) ?? draft;
+      validateProject(next);
+      set({ interactive: { ...edit, project: next }, error: null });
+      return true;
+    } catch (error) {
+      set({ error: (error as Error).message });
+      return false;
+    }
+  },
+  commitInteractive() {
+    const edit = get().interactive;
+    if (!edit) return true;
+    set({ interactive: null });
+    if (get().project !== edit.base.project) return false;
+    if (serializeProject(edit.project) === serializeProject(edit.base.project))
+      return true;
+    return get().transact(() => edit.project);
+  },
+  cancelInteractive() {
+    set({ interactive: null, error: null });
+  },
   project: initial,
   path: null,
   saved: serializeProject(initial),
@@ -72,10 +132,25 @@ export const useEditor = create<EditorState>((set, get) => ({
   clipboard: [],
   error: null,
   busy: null,
+  draggingAssetId: null,
+  draggingAssetIds: [],
+  assetSelection: [],
+  toggleSnapping() {
+    const enabled = !get().project.settings.snapping;
+    try {
+      globalThis.localStorage?.setItem("shortcut.snapping", String(enabled));
+    } catch {
+      /* Project setting still persists on save. */
+    }
+    get().transact((p) => {
+      p.settings.snapping = enabled;
+    });
+  },
   transact(recipe, selection) {
+    if (get().interactive) get().commitInteractive();
     const state = get();
     try {
-      const draft = structuredClone(state.project);
+      const draft = cloneProject(state.project);
       const next = recipe(draft) ?? draft;
       validateProject(next);
       set({
@@ -88,6 +163,10 @@ export const useEditor = create<EditorState>((set, get) => ({
         ),
         error: null,
         playing: false,
+        playhead: seekFrame(next, state.playhead),
+        activeTrack: next.tracks.some((t) => t.id === state.activeTrack)
+          ? state.activeTrack
+          : next.tracks[0].id,
       });
       return true;
     } catch (error) {
@@ -97,6 +176,10 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   edit: (command) => get().transact((p) => editProject(p, command)),
   undo() {
+    if (get().interactive) {
+      get().cancelInteractive();
+      return;
+    }
     const s = get(),
       prior = s.past.at(-1);
     if (!prior) return;
@@ -110,6 +193,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
   redo() {
+    get().cancelInteractive();
     const s = get(),
       next = s.future[0];
     if (!next) return;
@@ -123,6 +207,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
   select(id, additive = false) {
+    get().commitInteractive();
     const s = get(),
       track = s.project.tracks.find((t) => t.clips.some((c) => c.id === id));
     const related = [...linkedIds(s.project, [id])];
@@ -136,10 +221,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     });
   },
   seek(time) {
+    if (!Number.isFinite(time)) return;
     set({
-      playhead: Math.round(
-        Math.max(0, Math.min(duration(get().project), time)),
-      ),
+      playhead: seekFrame(get().project, time),
+      playing: false,
     });
   },
   addAsset(asset, trackId, at) {
@@ -159,16 +244,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       asset,
       at ?? Math.max(0, ...track.clips.map(end)),
     );
-    get().transact(
-      (p) => {
-        const ripple = p.settings.ripple;
-        if (at === undefined) p.settings.ripple = false;
-        const next = editProject(p, { type: "insert", clip });
-        next.settings.ripple = ripple;
-        return next;
-      },
-      [clip.id],
-    );
+    get().transact((p) => editProject(p, { type: "insert", clip }), [clip.id]);
     set({ activeTrack: track.id });
   },
   addText() {
@@ -181,16 +257,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const clip = newClip(track.id, undefined, s.playhead);
     clip.transform.y = s.project.resolution.height * 0.34;
     clip.text!.size = Math.round(s.project.resolution.width * 0.06);
-    get().transact(
-      (p) => {
-        const ripple = p.settings.ripple;
-        p.settings.ripple = false;
-        const next = editProject(p, { type: "insert", clip });
-        next.settings.ripple = ripple;
-        return next;
-      },
-      [clip.id],
-    );
+    get().transact((p) => editProject(p, { type: "insert", clip }), [clip.id]);
   },
   addTrack(type) {
     const track = newTrack(
@@ -213,14 +280,16 @@ export const useEditor = create<EditorState>((set, get) => ({
       ),
     });
   },
-  paste() {
+  paste(at = get().playhead) {
     const s = get();
     if (!s.clipboard.length) return;
     const first = Math.min(...s.clipboard.map((c) => c.timelineStart)),
       groups = new Map<string, string>();
     const clips = structuredClone(s.clipboard).map((c) => {
       c.id = uid();
-      c.timelineStart += s.playhead - first;
+      if (s.project.tracks.find((t) => t.id === c.trackId)?.type === "audio")
+        c.audioOnly = true;
+      c.timelineStart += at - first;
       if (c.groupId) {
         if (!groups.has(c.groupId)) groups.set(c.groupId, uid());
         c.groupId = groups.get(c.groupId);
@@ -244,14 +313,35 @@ export const useEditor = create<EditorState>((set, get) => ({
     s.copy();
     const clips = get().clipboard;
     if (clips.length) {
-      set({ playhead: Math.max(...clips.map(end)) });
-      get().paste();
+      const at = Math.max(...clips.map(end));
+      get().paste(at);
+      if (get().project !== s.project) get().seek(at);
     }
   },
-  load(project, path = null) {
+  load(project, path = null, expected) {
+    if (
+      expected &&
+      (get().project !== expected ||
+        (get().interactive &&
+          serializeProject(effectiveProject(get())) !==
+            serializeProject(expected)))
+    )
+      throw new Error(
+        "Project changed while opening. Current edits were kept; open again when ready.",
+      );
     validateProject(project);
+    const preference = snappingPreference();
+    if (preference !== undefined && preference !== project.settings.snapping)
+      project = {
+        ...project,
+        settings: { ...project.settings, snapping: preference },
+      };
+    documentGeneration++;
     set({
       project,
+      interactive: null,
+      assetSelection: [],
+      draggingAssetIds: [],
       path,
       saved: serializeProject(project),
       dirty: false,
@@ -263,16 +353,20 @@ export const useEditor = create<EditorState>((set, get) => ({
         project.tracks[0].id,
       past: [],
       future: [],
+      clipboard: [],
       error: null,
     });
   },
   async save(saveAs = false) {
+    get().commitInteractive();
     const s = get();
+    const generation = documentGeneration;
     if (s.busy) return false;
     set({ busy: "Saving project" });
     try {
       const file = await window.studio.saveProject(s.project, s.path, saveAs);
       if (!file) return false;
+      if (generation !== documentGeneration) return true;
       const saved = serializeProject(s.project);
       set({
         path: file,
@@ -282,10 +376,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       if (!get().dirty) await window.studio.clearRecovery();
       return true;
     } catch (error) {
-      set({ error: String(error) });
+      if (generation === documentGeneration) set({ error: String(error) });
       return false;
     } finally {
-      set({ busy: null });
+      if (get().busy === "Saving project") set({ busy: null });
     }
   },
   importAssets(result) {

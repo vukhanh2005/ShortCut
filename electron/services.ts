@@ -2,7 +2,12 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from "electron";
 import path from "node:path";
 import { access, mkdir, readFile, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { importAsset, makeProxy, pruneCache } from "./media.js";
+import {
+  importAsset,
+  makeProxy,
+  pruneCache,
+  validateReplacement,
+} from "./media.js";
 import { atomicWrite, readProject, saveProject } from "./project.js";
 import { detectNvenc, render } from "./render.js";
 import { run } from "./process.js";
@@ -33,6 +38,14 @@ export async function setupServices(window: BrowserWindow) {
     lastOutput = "",
     importBusy = false,
     recoveryWrite = Promise.resolve();
+  const queueRecovery = <T>(action: () => Promise<T>): Promise<T> => {
+    const job = recoveryWrite.catch(() => {}).then(action);
+    recoveryWrite = job.then(
+      () => {},
+      () => {},
+    );
+    return job;
+  };
   await mkdir(data, { recursive: true });
   await pruneCache(cache);
   try {
@@ -62,6 +75,7 @@ export async function setupServices(window: BrowserWindow) {
     assets.set(asset.id, asset);
     return {
       ...asset,
+      missing: false,
       url: mediaUrl(asset.path),
       thumbnail: asset.thumbnail ? mediaUrl(asset.thumbnail) : undefined,
     };
@@ -112,6 +126,7 @@ export async function setupServices(window: BrowserWindow) {
       const original = project.mediaAssets[i];
       try {
         const loaded = await importAsset(original.path, cache);
+        validateReplacement(original, loaded);
         project.mediaAssets[i] = expose({
           ...loaded,
           id: original.id,
@@ -216,12 +231,7 @@ export async function setupServices(window: BrowserWindow) {
     });
     if (pick.canceled) return null;
     const loaded = await importAsset(pick.filePaths[0], cache);
-    if (loaded.type !== asset.type)
-      throw new Error("Replacement must have the same media type.");
-    if (loaded.type !== "image" && loaded.duration < asset.duration)
-      throw new Error(
-        "Replacement is shorter than original media. Choose a file at least as long to preserve source ranges.",
-      );
+    validateReplacement(asset, loaded);
     return expose({
       ...loaded,
       id: asset.id,
@@ -279,22 +289,21 @@ export async function setupServices(window: BrowserWindow) {
   );
   handle("autosave", async (input: unknown) => {
     const text = serializeProject(trustedProject(input));
-    recoveryWrite = recoveryWrite
-      .catch(() => {})
-      .then(() => atomicWrite(recovery, text));
-    await recoveryWrite;
+    await queueRecovery(() => atomicWrite(recovery, text));
   });
   handle("recover", async () => {
-    try {
-      await access(recovery);
-    } catch {
-      return null;
-    }
-    return { project: await hydrate(await readProject(recovery)), path: null };
+    const project = await queueRecovery(async () => {
+      try {
+        return await readProject(recovery);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+        throw error;
+      }
+    });
+    return project ? { project: await hydrate(project), path: null } : null;
   });
   handle("clear-recovery", async () => {
-    await recoveryWrite.catch(() => {});
-    await rm(recovery, { force: true });
+    await queueRecovery(() => rm(recovery, { force: true }));
   });
   handle("import-srt", async () => {
     const pick = await dialog.showOpenDialog(window, {

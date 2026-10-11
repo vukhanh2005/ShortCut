@@ -7,7 +7,7 @@ import {
   ChevronRight,
   Scan,
 } from "lucide-react";
-import { useEditor } from "../stores/editor";
+import { useEditor, effectiveProject } from "../stores/editor";
 import {
   type Clip,
   type MediaAsset,
@@ -17,6 +17,7 @@ import {
   formatTime,
   seconds,
   frame,
+  seekFrame,
 } from "../editor/model";
 import { fadeAt } from "../editor/timeline";
 let audioContext: AudioContext | undefined;
@@ -28,12 +29,14 @@ function Player({
   clip,
   asset,
   muted,
+  trackVolume,
   visual,
   project,
 }: {
   clip: Clip;
   asset: MediaAsset;
   muted: boolean;
+  trackVolume: number;
   visual: boolean;
   project: Project;
 }) {
@@ -65,30 +68,41 @@ function Player({
       node.disconnect();
       gain.current = null;
     };
-  }, [asset.hasAudio]);
+  }, [asset.hasAudio, asset.url, asset.missing]);
   useEffect(() => {
     const element = ref.current;
     if (!element) return;
     const sync = () => {
       if (
+        element.readyState >= 1 &&
+        !element.seeking &&
         Math.abs(element.currentTime - source) >
-        (playing ? Math.max(0.04, 1 / project.frameRate) : 0.005)
+          (playing ? Math.max(0.04, 1 / project.frameRate) : 0.000002)
       )
         element.currentTime = source;
       element.playbackRate = clip.playbackSpeed;
       if (gain.current) {
         element.volume = 1;
-        gain.current.gain.value = clip.volume * fadeAt(clip, local);
+        gain.current.gain.value =
+          clip.volume * trackVolume * fadeAt(clip, local);
         if (playing) void audioContext?.resume();
-      } else element.volume = Math.min(1, clip.volume * fadeAt(clip, local));
-      element.muted = muted;
-      if (playing && element.paused) element.play().catch(() => {});
-      else if (!playing && !element.paused) element.pause();
+      } else
+        element.volume = Math.min(
+          1,
+          clip.volume * trackVolume * fadeAt(clip, local),
+        );
+      element.muted = muted || !!clip.muted || clip.audioEnabled === false;
+      if (!playing && !element.paused) element.pause();
     };
     sync();
     element.addEventListener("loadedmetadata", sync);
-    return () => element.removeEventListener("loadedmetadata", sync);
-  }, [source, playing, muted, clip, local]);
+    // Coalesce seeks while decoding; completion always uses the latest effect target.
+    element.addEventListener("seeked", sync);
+    return () => {
+      element.removeEventListener("loadedmetadata", sync);
+      element.removeEventListener("seeked", sync);
+    };
+  }, [source, playing, muted, clip, local, project.frameRate, trackVolume]);
   const style = {
     width: asset.width * ratio,
     height: asset.height * ratio,
@@ -97,6 +111,9 @@ function Player({
     transform: `translate(-50%,-50%) rotate(${clip.transform.rotation}deg) scale(${clip.transform.scale * (clip.transform.flipX ? -1 : 1)},${clip.transform.scale * (clip.transform.flipY ? -1 : 1)})`,
     opacity: clip.opacity * fadeAt(clip, local),
     display: visual ? undefined : "none",
+    clipPath: clip.transform.crop
+      ? `inset(${clip.transform.crop.top * 100}% ${clip.transform.crop.right * 100}% ${clip.transform.crop.bottom * 100}% ${clip.transform.crop.left * 100}%)`
+      : undefined,
   };
   if (asset.missing)
     return visual ? (
@@ -132,8 +149,14 @@ function Player({
   );
 }
 export function Preview() {
-  const { project, playhead, playing, selection } = useEditor();
+  const { playhead, playing, selection, interactive } = useEditor();
+  const project = useEditor(effectiveProject);
   const box = useRef<HTMLDivElement>(null);
+  const stage = useRef<HTMLDivElement>(null);
+  const cleanup = useRef<(() => void) | null>(null);
+  const [alignment, setAlignment] = useState({ x: false, y: false });
+  const [previewZoom, setPreviewZoom] = useState(1);
+  useEffect(() => () => cleanup.current?.(), []);
   const [fit, setFit] = useState(0.25),
     [guides, setGuides] = useState(true);
   useEffect(() => {
@@ -148,7 +171,7 @@ export function Preview() {
     );
     observer.observe(element);
     return () => observer.disconnect();
-  }, [project.resolution]);
+  }, [project.resolution.width, project.resolution.height]);
   const active = [...project.tracks]
     .reverse()
     .flatMap((track) =>
@@ -166,7 +189,12 @@ export function Preview() {
       !clip.text &&
       asset?.type !== "image" &&
       ((track.visible && track.type === "video" && clip.opacity > 0) ||
-        (asset?.hasAudio && !track.muted && clip.volume > 0)),
+        (asset?.hasAudio &&
+          clip.audioEnabled !== false &&
+          !clip.muted &&
+          (track.volume ?? 1) > 0 &&
+          !track.muted &&
+          clip.volume > 0)),
   );
   const overLimit = decoders.length > 12;
   useEffect(() => {
@@ -183,16 +211,29 @@ export function Preview() {
       previous = performance.now();
     const tick = (now: number) => {
       const state = useEditor.getState();
+      if (!state.playing) return;
       const elapsed = Math.min(100, now - previous);
       previous = now;
-      const ready = [
+      const players = [
         ...document.querySelectorAll<HTMLVideoElement>("[data-player]"),
-      ].every((v) => v.readyState >= 2 && !v.seeking);
+      ];
+      const ready = players.every((v) => v.readyState >= 2 && !v.seeking);
+      for (const player of players) {
+        if (!ready) player.pause();
+        else if (player.paused && !player.ended)
+          void player.play().catch((error: Error) => {
+            if (error.name !== "AbortError" && useEditor.getState().playing)
+              useEditor.setState({
+                playing: false,
+                error: `Preview playback failed: ${error.message}`,
+              });
+          });
+      }
       if (ready) {
         const next = state.playhead + Math.round(elapsed * 1000),
           total = duration(state.project);
         useEditor.setState({
-          playhead: Math.min(next, total),
+          playhead: next < total ? next : seekFrame(state.project, total),
           playing: next < total,
         });
       }
@@ -205,31 +246,96 @@ export function Preview() {
     if (!duration(project)) return;
     useEditor.setState({
       playing: !playing,
-      ...(playhead >= duration(project) ? { playhead: 0 } : {}),
+      ...(playhead >= seekFrame(project, duration(project))
+        ? { playhead: 0 }
+        : {}),
     });
   };
   const moveVisual = (event: React.PointerEvent, clip: Clip) => {
+    if (event.button !== 0) return;
     if (project.tracks.find((t) => t.id === clip.trackId)?.locked) return;
     event.preventDefault();
+    event.stopPropagation();
+    cleanup.current?.();
+    (document.activeElement as HTMLElement)?.blur();
     useEditor.getState().select(clip.id);
+    const state = useEditor.getState();
+    clip = state.project.tracks
+      .flatMap((t) => t.clips)
+      .find((c) => c.id === clip.id)!;
+    state.beginInteractive(`transform:${clip.id}`);
+    const host = event.currentTarget as HTMLElement,
+      id = event.pointerId;
+    host.setPointerCapture(id);
+    const rect = stage.current!.getBoundingClientRect();
+    const scale = rect.width / project.resolution.width;
     const x = event.clientX,
       y = event.clientY,
       original = clip.transform;
-    const up = (e: PointerEvent) => {
-      window.removeEventListener("pointerup", up);
-      useEditor.getState().edit({
-        type: "patch",
-        ids: [clip.id],
-        patch: {
-          transform: {
-            ...original,
-            x: Math.round(original.x + (e.clientX - x) / fit),
-            y: Math.round(original.y + (e.clientY - y) / fit),
-          },
-        },
+    let pending: PointerEvent | undefined,
+      raf = 0;
+    const update = (e: PointerEvent) => {
+      const next = {
+        ...original,
+        x: Math.round(original.x + (e.clientX - x) / scale),
+        y: Math.round(original.y + (e.clientY - y) / scale),
+      };
+      const align = {
+        x: Math.abs(next.x * scale) <= 6,
+        y: Math.abs(next.y * scale) <= 6,
+      };
+      if (align.x) next.x = 0;
+      if (align.y) next.y = 0;
+      setAlignment(align);
+      useEditor.getState().updateInteractive((p) => {
+        p.tracks
+          .flatMap((t) => t.clips)
+          .find((c) => c.id === clip.id)!.transform = next;
       });
     };
-    window.addEventListener("pointerup", up, { once: true });
+    const move = (e: PointerEvent) => {
+      if (e.pointerId !== id) return;
+      pending = e;
+      if (!raf)
+        raf = requestAnimationFrame(() => {
+          raf = 0;
+          if (pending) update(pending);
+        });
+    };
+    const finish = (cancel: boolean) => {
+      cancelAnimationFrame(raf);
+      host.removeEventListener("pointermove", move);
+      host.removeEventListener("pointerup", up);
+      host.removeEventListener("pointercancel", lost);
+      host.removeEventListener("lostpointercapture", lost);
+      window.removeEventListener("keydown", key);
+      if (host.hasPointerCapture(id)) host.releasePointerCapture(id);
+      cleanup.current = null;
+      setAlignment({ x: false, y: false });
+      if (cancel) useEditor.getState().cancelInteractive();
+      else useEditor.getState().commitInteractive();
+    };
+    const up = (e: PointerEvent) => {
+      if (e.pointerId === id) {
+        update(e);
+        finish(false);
+      }
+    };
+    const lost = (e: PointerEvent) => {
+      if (e.pointerId === id) finish(true);
+    };
+    const key = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        finish(true);
+      }
+    };
+    host.addEventListener("pointermove", move);
+    host.addEventListener("pointerup", up);
+    host.addEventListener("pointercancel", lost);
+    host.addEventListener("lostpointercapture", lost);
+    window.addEventListener("keydown", key);
+    cleanup.current = () => finish(true);
   };
   return (
     <section className="preview-panel" aria-label="Preview">
@@ -251,16 +357,17 @@ export function Preview() {
         <div
           className="stage-wrapper"
           style={{
-            width: project.resolution.width * fit,
-            height: project.resolution.height * fit,
+            width: project.resolution.width * fit * previewZoom,
+            height: project.resolution.height * fit * previewZoom,
           }}
         >
           <div
             className="stage"
+            ref={stage}
             style={{
               width: project.resolution.width,
               height: project.resolution.height,
-              transform: `scale(${fit})`,
+              transform: `scale(${fit * previewZoom})`,
             }}
           >
             {!overLimit &&
@@ -269,6 +376,17 @@ export function Preview() {
                   ? track.visible && (
                       <div
                         key={clip.id}
+                        data-visual-id={clip.id}
+                        tabIndex={0}
+                        role="button"
+                        aria-label={`Text ${clip.name}`}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            useEditor.getState().select(clip.id);
+                          }
+                        }}
                         className={`text-layer ${selection.includes(clip.id) ? "selected-text" : ""}`}
                         onPointerDown={(e) => moveVisual(e, clip)}
                         style={{
@@ -298,18 +416,30 @@ export function Preview() {
                     ((track.visible &&
                       track.type === "video" &&
                       clip.opacity > 0) ||
-                      (asset.hasAudio && !track.muted && clip.volume > 0)) && (
+                      (asset.hasAudio &&
+                        clip.audioEnabled !== false &&
+                        !clip.muted &&
+                        (track.volume ?? 1) > 0 &&
+                        !track.muted &&
+                        clip.volume > 0)) && (
                       <Player
                         key={clip.id}
                         clip={clip}
                         asset={asset}
                         muted={track.muted}
+                        trackVolume={track.volume ?? 1}
                         visual={track.visible && track.type === "video"}
                         project={project}
                       />
                     ),
               )}
             {guides && <div className="safe-guide" />}
+            {interactive?.key.startsWith("transform:") && alignment.x && (
+              <div className="alignment-guide vertical" />
+            )}
+            {interactive?.key.startsWith("transform:") && alignment.y && (
+              <div className="alignment-guide horizontal" />
+            )}
           </div>
           {!duration(project) && (
             <div className="preview-empty">
@@ -370,7 +500,16 @@ export function Preview() {
             <ChevronRight size={16} />
           </button>
         </div>
-        <span className="fit-label">Fit {Math.round(fit * 100)}%</span>
+        <select
+          aria-label="Preview zoom"
+          className="fit-label"
+          value={previewZoom}
+          onChange={(e) => setPreviewZoom(+e.target.value)}
+        >
+          <option value={1}>Fit {Math.round(fit * 100)}%</option>
+          <option value={0.5}>Half fit</option>
+          <option value={1.5}>150% fit</option>
+        </select>
       </div>
     </section>
   );

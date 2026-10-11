@@ -5,9 +5,9 @@ export to filesystems without hard links, missing-file/relink stress coverage,
 safe parallel save/recovery fault injection, rotated/VFR media fixtures, and
 clean-machine installer qualification with documented FFmpeg provisioning.
 
-P1: source-handle-aware crossfade/dissolve/slide/zoom transitions; crop;
+P1: source-handle-aware crossfade/dissolve/slide/zoom transitions;
 preview transform handles; precise browser/libass text-layout parity; independent
-audio fades; audio detach/relink command; independent export resize/FPS overrides;
+audio fades; independent export resize/FPS overrides;
 recent audio history and in-app cache cleanup.
 
 P2: linear keyframes shared by preview/render, explicit decoded frame cache,

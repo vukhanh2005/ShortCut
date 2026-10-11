@@ -1,3 +1,34 @@
+# Current validation - 2026-10-11
+
+Real-time editing milestone: production build passed, 60 unit/native tests passed
+(4.60s), and the final 15-test Electron suite passed (42.9s). New coverage includes
+live numeric/slider changes before blur, shared text coordinates during dragging,
+Escape and lost capture, one-transaction undo, fit zoom, occupied-track ghosts,
+linked insertion, marquee after zoom/scroll, ordered mixed-media library drops,
+transient-load protection and committed-crop export pixels/audio. Existing
+eight-clip editing/save/reopen/MP4 workflow still passes. Inspector screenshots
+were visually inspected. Package verification is recorded in release.md and
+package-smoke.json. Full failed-run notes are in DEVELOPMENT_STATUS.md.
+
+## Earlier persistence milestone (historical)
+
+Production build passes. 46 unit/native tests and 9 Electron tests pass. Latest
+full suite: native 3.80 s, desktop 32.5 s. Subsequent recovered-project undo fix
+rebuilt and targeted recovery test passed. Tests use actual FFmpeg, persistence,
+media decoding and Web Audio nodes; only file dialogs and deliberate test stall
+are controlled. See DEVELOPMENT_STATUS.md for per-change evidence and limits.
+
+Current tests additionally cover save completion across document loads, editing
+during open/save, recovery queue ordering, abnormal process exit/restart,
+shortened-source relink, track gain and clip mute, real PCM amplitude, and
+coordinated player pause/resume. Current 60-second 1080x1920 benchmark completed: load 1921 ms, first frame 1954 ms,
+seeks 62..162 ms, working set 827 MiB, CPU export 34.03 s. RAF median 8.3 ms,
+p95 8.5 ms, max 33.4 ms. These measure UI responsiveness, not presented-video FPS
+or audio synchronization. benchmark-latest.json holds exact fixture and values.
+Older measurements below remain historical.
+
+## Earlier foundation measurements
+
 # Executed validation
 
 Build: TypeScript strict renderer/native compilation and production Vite build.

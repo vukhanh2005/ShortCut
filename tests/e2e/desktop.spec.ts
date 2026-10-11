@@ -188,11 +188,20 @@ test("eight-clip editing workflow imports, edits, previews, saves, reopens and e
   }
   const userData = path.join(root, "profile");
   await mkdir(userData, { recursive: true });
-  const launch = () =>
-    electron.launch({
+  const launch = async () => {
+    const instance = await electron.launch({
       args: ["."],
       env: { ...process.env, SHORTCUT_DEV: "0", SHORTCUT_TEST_HOME: userData },
     });
+    await instance.evaluate(({ dialog }) => {
+      dialog.showMessageBox = async () => ({
+        response: 1,
+        checkboxChecked: false,
+      });
+      dialog.showMessageBoxSync = () => 1;
+    });
+    return instance;
+  };
   let app = await launch();
   try {
     let page = await app.firstWindow();
@@ -222,6 +231,7 @@ test("eight-clip editing workflow imports, edits, previews, saves, reopens and e
     for (let i = 1; i <= 8; i++)
       await page.getByLabel(`Add scene-${i}.mp4`, { exact: true }).click();
     await expect(page.locator(".clip-video")).toHaveCount(8);
+    await page.getByLabel("Ripple", { exact: true }).check();
     await page
       .locator(".clip-video")
       .first()
